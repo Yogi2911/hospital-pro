@@ -8,7 +8,7 @@ load_dotenv()
 # DATABASE_URL examples:
 #   SQLite (default, zero setup):  sqlite:///./hospital.db
 #   PostgreSQL (Task 5 in the guide): postgresql+psycopg2://user:password@host:5432/dbname
-DATABASE_URL = os.getenv("DATABASE_URL", "hospitalpg26.postgres.database.azure.com")
+DATABASE_URL = os.getenv("DATABASE_URL", "hospital-api.postgres.database.azure.com")
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 
