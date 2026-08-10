@@ -243,7 +243,7 @@ jobs:
           echo "Docker image pushed successfully."
 
 
-            # ==========================================================
+                 # ==========================================================
       # 9. GET LATEST 5 ENVIRONMENT-SPECIFIC IMAGES
       # ==========================================================
 
@@ -260,48 +260,52 @@ jobs:
           echo "Repository  : $IMAGE_NAME"
           echo "======================================"
 
+          echo ""
+          echo "Fetching images from ACR..."
+
           ALL_TAGS=$(az acr repository show-tags \
             --name "$ACR_NAME" \
             --repository "$IMAGE_NAME" \
             --output tsv)
 
+          if [ -z "$ALL_TAGS" ]; then
+            echo "No images found in ACR."
+            exit 1
+          fi
+
           echo ""
-          echo "All tags in ACR:"
-          echo "$ALL_TAGS"
-          echo ""
+          echo "Filtering images for environment: $DEPLOY_ENV"
 
           ENV_TAGS=$(echo "$ALL_TAGS" \
-            | grep -E "^v[0-9.]+-${DEPLOY_ENV}-b[0-9]+$" \
-            | while read TAG; do
-                BUILD=$(echo "$TAG" | sed -E 's/.*-b([0-9]+)$/\1/')
-                echo "$BUILD|$TAG"
-              done \
+            | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+-${DEPLOY_ENV}-b[0-9]+$" \
+            | sed -E 's/.*-b([0-9]+)$/\1|&/' \
             | sort -t'|' -k1,1nr \
             | head -5 \
             | cut -d'|' -f2)
 
           if [ -z "$ENV_TAGS" ]; then
-            echo "======================================"
-            echo "NO IMAGES FOUND"
-            echo "======================================"
-            echo "Environment: $DEPLOY_ENV"
+            echo ""
+            echo "❌ No images found for environment: $DEPLOY_ENV"
+            echo ""
+            echo "Available ACR tags:"
+            echo "$ALL_TAGS"
             exit 1
           fi
 
           echo ""
-          echo "Latest 5 $DEPLOY_ENV images:"
-          echo "--------------------------------------"
+          echo "======================================"
+          echo "LATEST 5 $DEPLOY_ENV IMAGES"
+          echo "======================================"
 
           INDEX=0
 
-          while read TAG; do
+          while IFS= read -r TAG; do
             echo "[$INDEX] $TAG"
             INDEX=$((INDEX + 1))
           done <<< "$ENV_TAGS"
 
-          echo "--------------------------------------"
-
-               # ==========================================================
+          echo "======================================"
+                    # ==========================================================
       # 10. DETERMINE ROLLBACK IMAGE
       # ==========================================================
 
@@ -315,46 +319,53 @@ jobs:
           echo "======================================"
           echo "ROLLBACK SELECTION"
           echo "======================================"
-
           echo "Environment : $DEPLOY_ENV"
           echo "Selection   : $SELECTED"
           echo "Registry    : $ACR_NAME"
-          echo "Container   : $APP_NAME"
+          echo "======================================"
 
           echo ""
+          echo "Fetching $DEPLOY_ENV images..."
 
           ALL_TAGS=$(az acr repository show-tags \
             --name "$ACR_NAME" \
             --repository "$IMAGE_NAME" \
             --output tsv)
 
+          if [ -z "$ALL_TAGS" ]; then
+            echo "❌ No images found in ACR."
+            exit 1
+          fi
+
           ENV_TAGS=$(echo "$ALL_TAGS" \
-            | grep -E "^v[0-9.]+-${DEPLOY_ENV}-b[0-9]+$" \
-            | while read TAG; do
-                BUILD=$(echo "$TAG" | sed -E 's/.*-b([0-9]+)$/\1/')
-                echo "$BUILD|$TAG"
-              done \
+            | grep -E "^v[0-9]+\.[0-9]+\.[0-9]+-${DEPLOY_ENV}-b[0-9]+$" \
+            | sed -E 's/.*-b([0-9]+)$/\1|&/' \
             | sort -t'|' -k1,1nr \
             | head -5 \
             | cut -d'|' -f2)
 
           if [ -z "$ENV_TAGS" ]; then
-            echo "No $DEPLOY_ENV images found."
+            echo "❌ No images found for environment: $DEPLOY_ENV"
             exit 1
           fi
 
           echo ""
-          echo "Available rollback images:"
-          echo "--------------------------------------"
+          echo "======================================"
+          echo "LATEST 5 AVAILABLE IMAGES"
+          echo "======================================"
 
           INDEX=0
 
-          while read TAG; do
+          while IFS= read -r TAG; do
             echo "[$INDEX] $TAG"
             INDEX=$((INDEX + 1))
           done <<< "$ENV_TAGS"
 
-          echo "--------------------------------------"
+          echo "======================================"
+
+          # ------------------------------------------------------
+          # SELECT ROLLBACK POSITION
+          # ------------------------------------------------------
 
           case "$SELECTED" in
 
@@ -379,22 +390,31 @@ jobs:
               ;;
 
             *)
-              echo "Invalid rollback selection."
+              echo "❌ Invalid rollback selection: $SELECTED"
               exit 1
               ;;
 
           esac
 
+          # ------------------------------------------------------
+          # GET IMAGE TAG
+          # ------------------------------------------------------
+
           IMAGE_TAG=$(echo "$ENV_TAGS" | sed -n "$((INDEX + 1))p")
 
           if [ -z "$IMAGE_TAG" ]; then
 
+            echo ""
             echo "======================================"
-            echo "ROLLBACK FAILED"
+            echo "❌ ROLLBACK FAILED"
             echo "======================================"
 
             echo "Requested : $SELECTED"
             echo "Index     : $INDEX"
+
+            AVAILABLE=$(echo "$ENV_TAGS" | grep -c . || true)
+
+            echo "Available : $AVAILABLE"
 
             exit 1
 
@@ -404,19 +424,13 @@ jobs:
 
           echo ""
           echo "======================================"
-          echo "ROLLBACK READY"
+          echo "✅ ROLLBACK READY"
           echo "======================================"
-
           echo "Environment : $DEPLOY_ENV"
           echo "Selection   : $SELECTED"
           echo "Selected    : $IMAGE_TAG"
           echo "Registry    : $ACR_NAME"
-          echo "Container   : $APP_NAME"
-
-          echo ""
-          echo "Rollback image:"
-          echo "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
-
+          echo "Image       : $ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
           echo "======================================"
       # ==========================================================
       # 11. DEPLOY CONTAINER APP
