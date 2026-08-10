@@ -19,12 +19,16 @@ on:
           - prod
 
 permissions:
-  contents: read
   id-token: write
+  contents: read
 
 env:
   RESOURCE_GROUP: Hosp-Task-26
   IMAGE_NAME: hospital-api
+
+  DEV_APP: hospital-dev
+  QA_APP: hospital-qa
+  PROD_APP: hospital-prod
 
 jobs:
 
@@ -32,19 +36,21 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    environment: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || (github.ref_name == 'main' && 'prod' || github.ref_name) }}
+
     steps:
 
-      # -----------------------------------------
+      ###########################################################
       # 1. Checkout
-      # -----------------------------------------
+      ###########################################################
 
       - name: Checkout
         uses: actions/checkout@v4
 
 
-      # -----------------------------------------
+      ###########################################################
       # 2. Azure Login
-      # -----------------------------------------
+      ###########################################################
 
       - name: Azure Login
         uses: azure/login@v2
@@ -52,9 +58,9 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
 
-      # -----------------------------------------
+      ###########################################################
       # 3. Decide Environment
-      # -----------------------------------------
+      ###########################################################
 
       - name: Decide Environment
         shell: bash
@@ -64,22 +70,23 @@ jobs:
 
             ENV="${{ github.event.inputs.environment }}"
 
-          elif [ "${GITHUB_REF_NAME}" = "dev" ]; then
-
-            ENV="dev"
-
-          elif [ "${GITHUB_REF_NAME}" = "qa" ]; then
-
-            ENV="qa"
-
-          elif [ "${GITHUB_REF_NAME}" = "main" ]; then
-
-            ENV="prod"
-
           else
 
-            echo "Invalid branch"
-            exit 1
+            BRANCH="${GITHUB_REF_NAME}"
+
+            if [ "$BRANCH" = "dev" ]; then
+              ENV="dev"
+
+            elif [ "$BRANCH" = "qa" ]; then
+              ENV="qa"
+
+            elif [ "$BRANCH" = "main" ]; then
+              ENV="prod"
+
+            else
+              echo "Invalid branch: $BRANCH"
+              exit 1
+            fi
 
           fi
 
@@ -88,11 +95,11 @@ jobs:
           echo "Environment = $ENV"
 
 
-      # -----------------------------------------
-      # 4. Select ACR
-      # -----------------------------------------
+      ###########################################################
+      # 4. Select ACR and Container App
+      ###########################################################
 
-      - name: Select ACR
+      - name: Select Registry and Container App
         shell: bash
         run: |
 
@@ -100,19 +107,19 @@ jobs:
 
             echo "ACR_NAME=hospdevacr26" >> "$GITHUB_ENV"
             echo "ACR_LOGIN_SERVER=hospdevacr26.azurecr.io" >> "$GITHUB_ENV"
-            echo "APP_NAME=hospital-dev" >> "$GITHUB_ENV"
+            echo "APP_NAME=$DEV_APP" >> "$GITHUB_ENV"
 
           elif [ "$DEPLOY_ENV" = "qa" ]; then
 
             echo "ACR_NAME=hospacrqa" >> "$GITHUB_ENV"
             echo "ACR_LOGIN_SERVER=hospacrqa.azurecr.io" >> "$GITHUB_ENV"
-            echo "APP_NAME=hospital-qa" >> "$GITHUB_ENV"
+            echo "APP_NAME=$QA_APP" >> "$GITHUB_ENV"
 
           elif [ "$DEPLOY_ENV" = "prod" ]; then
 
             echo "ACR_NAME=hospacr26" >> "$GITHUB_ENV"
             echo "ACR_LOGIN_SERVER=hospacr26.azurecr.io" >> "$GITHUB_ENV"
-            echo "APP_NAME=hospital-prod" >> "$GITHUB_ENV"
+            echo "APP_NAME=$PROD_APP" >> "$GITHUB_ENV"
 
           else
 
@@ -121,26 +128,29 @@ jobs:
 
           fi
 
-          echo "ACR = $ACR_NAME"
-          echo "Server = $ACR_LOGIN_SERVER"
-          echo "App = $APP_NAME"
+          echo "======================================"
+          echo "Environment : $DEPLOY_ENV"
+          echo "ACR         : $ACR_NAME"
+          echo "Login Server: $ACR_LOGIN_SERVER"
+          echo "App         : $APP_NAME"
+          echo "======================================"
 
 
-      # -----------------------------------------
+      ###########################################################
       # 5. Login to selected ACR
-      # -----------------------------------------
+      ###########################################################
 
-      - name: Login to ACR
+      - name: Login ACR
         run: |
 
           az acr login --name "$ACR_NAME"
 
 
-      # -----------------------------------------
-      # 6. Generate NEW image tag
-      # -----------------------------------------
+      ###########################################################
+      # 6. Generate Automatic Image Tag
+      ###########################################################
 
-      - name: Generate Image Tag
+      - name: Generate Image Version
         shell: bash
         run: |
 
@@ -153,14 +163,14 @@ jobs:
           echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
 
           echo "======================================"
-          echo "NEW IMAGE TAG"
+          echo "Generated Image Tag:"
           echo "$IMAGE_TAG"
           echo "======================================"
 
 
-      # -----------------------------------------
-      # 7. Build
-      # -----------------------------------------s
+      ###########################################################
+      # 7. Build Docker Image
+      ###########################################################
 
       - name: Build Docker Image
         run: |
@@ -170,9 +180,9 @@ jobs:
             .
 
 
-      # -----------------------------------------
-      # 8. Push NEW image to ACR
-      # -----------------------------------------
+      ###########################################################
+      # 8. Push Docker Image
+      ###########################################################
 
       - name: Push Docker Image
         run: |
@@ -181,9 +191,26 @@ jobs:
             "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
 
 
-      # -----------------------------------------
-      # 9. Deploy Container App
-      # -----------------------------------------
+      ###########################################################
+      # 9. Verify Image Exists in ACR
+      ###########################################################
+
+      - name: Verify Image in ACR
+        run: |
+
+          echo "Checking image in ACR..."
+
+          az acr repository show-tags \
+            --name "$ACR_NAME" \
+            --repository "$IMAGE_NAME" \
+            --orderby time_desc \
+            --top 5 \
+            -o table
+
+
+      ###########################################################
+      # 10. Deploy Container App
+      ###########################################################
 
       - name: Deploy Container App
         run: |
@@ -194,24 +221,24 @@ jobs:
             --image "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
 
 
-      # -----------------------------------------
-      # 10. Verify
-      # -----------------------------------------
+      ###########################################################
+      # 11. Verify Container App
+      ###########################################################
 
       - name: Verify Deployment
         run: |
 
           echo "======================================"
-          echo "Deployment completed"
+          echo "Deployment Completed"
           echo "======================================"
 
           echo "Environment : $DEPLOY_ENV"
           echo "Registry    : $ACR_NAME"
-          echo "Image       : $IMAGE_TAG"
+          echo "Image       : $ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
           echo "Container   : $APP_NAME"
 
           echo ""
-          echo "Current image:"
+          echo "Current Container App Image:"
 
           az containerapp show \
             --name "$APP_NAME" \
