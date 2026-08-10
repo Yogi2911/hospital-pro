@@ -304,14 +304,8 @@ jobs:
           echo "--------------------------------------"
           echo "Total available: $COUNT"
 
-      # ==========================================================
+            # ==========================================================
       # 10. DETERMINE ROLLBACK IMAGE
-      #
-      # latest     = newest
-      # latest -1  = previous
-      # latest -2  = 2 versions back
-      # latest -3  = 3 versions back
-      # latest -4  = 4 versions back
       # ==========================================================
 
       - name: Determine Rollback Image
@@ -324,64 +318,39 @@ jobs:
           echo "======================================"
           echo "ROLLBACK SELECTION"
           echo "======================================"
-
           echo "Environment : $DEPLOY_ENV"
           echo "Selection   : $SELECTED"
           echo "Registry    : $ACR_NAME"
-          echo ""
-
-          # ------------------------------------------------------
-          # Get all tags
-          # ------------------------------------------------------
+          echo "======================================"
 
           ALL_TAGS=$(az acr repository show-tags \
             --name "$ACR_NAME" \
             --repository "$IMAGE_NAME" \
             --output json)
 
-          # ------------------------------------------------------
-          # Filter only selected environment
-          # and sort by numeric build number
-          # ------------------------------------------------------
+          # Get only the selected environment's images
+          ENV_TAGS=$(echo "$ALL_TAGS" | jq -r --arg ENV "$DEPLOY_ENV" '
+            .[]
+            | select(test("^v[0-9.]+-" + $ENV + "-b[0-9]+$"))
+          ' | while read TAG; do
+                BUILD=$(echo "$TAG" | sed -E 's/.*-b([0-9]+)$/\1/')
+                echo "$BUILD|$TAG"
+            done | sort -t'|' -k1,1nr | head -5 | cut -d'|' -f2)
 
-          ENV_TAGS=$(echo "$ALL_TAGS" | jq -r \
-            --arg ENV "$DEPLOY_ENV" '
-              [
-                .[]
-                | select(
-                    test("^v[0-9.]+-" + $ENV + "-b[0-9]+$")
-                  )
-              ]
-              | sort_by(
-                  capture("-b(?<build>[0-9]+)$").build
-                  | tonumber
-                )
-              | reverse
-              | .[0:5]
-              | .[]
-            ')
-
-          if [ -z "$ENV_TAGS" ]; then
-
-            echo "======================================"
-            echo "ROLLBACK FAILED"
-            echo "======================================"
-
-            echo "No images found for environment: $DEPLOY_ENV"
-
-            exit 1
-
-          fi
-
+          echo ""
           echo "Latest 5 $DEPLOY_ENV images:"
-          echo ""
-          echo "$ENV_TAGS"
-          echo ""
+          echo "--------------------------------------"
 
-          # ------------------------------------------------------
-          # Determine selected index
-          # ------------------------------------------------------
+          INDEX=0
 
+          while read TAG; do
+            echo "[$INDEX] $TAG"
+            INDEX=$((INDEX + 1))
+          done <<< "$ENV_TAGS"
+
+          echo "--------------------------------------"
+
+          # Select rollback index
           case "$SELECTED" in
 
             "latest")
@@ -405,54 +374,43 @@ jobs:
               ;;
 
             *)
-              echo "Invalid rollback selection: $SELECTED"
+              echo "❌ Invalid rollback selection"
               exit 1
               ;;
 
           esac
 
-          # ------------------------------------------------------
-          # Select image
-          # ------------------------------------------------------
-
+          # Get selected image
           IMAGE_TAG=$(echo "$ENV_TAGS" | sed -n "$((INDEX + 1))p")
-
-          # ------------------------------------------------------
-          # Check selected image exists
-          # ------------------------------------------------------
 
           if [ -z "$IMAGE_TAG" ]; then
 
+            echo ""
             echo "======================================"
-            echo "ROLLBACK FAILED"
+            echo "❌ ROLLBACK FAILED"
             echo "======================================"
 
             echo "Requested : $SELECTED"
-            echo "Available : $(echo "$ENV_TAGS" | wc -l)"
+            echo "Index     : $INDEX"
+            echo "Available : $(echo "$ENV_TAGS" | grep -c .)"
 
             exit 1
 
           fi
 
-          # ------------------------------------------------------
-          # Save image tag
-          # ------------------------------------------------------
-
+          # Save image for next step
           echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
 
           echo ""
           echo "======================================"
-          echo "ROLLBACK READY"
+          echo "✅ ROLLBACK READY"
           echo "======================================"
-
           echo "Environment : $DEPLOY_ENV"
           echo "Selection   : $SELECTED"
-          echo "Image Tag   : $IMAGE_TAG"
+          echo "Selected    : $IMAGE_TAG"
           echo "Registry    : $ACR_NAME"
           echo "Image       : $ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
-
           echo "======================================"
-
 
       # ==========================================================
       # 11. DEPLOY CONTAINER APP
