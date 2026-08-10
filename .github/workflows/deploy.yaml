@@ -228,11 +228,8 @@ jobs:
 
           echo "Image pushed successfully."
 
-
       # ==========================================================
-      # 9. SHOW LATEST ENVIRONMENT-SPECIFIC TAGS
-      #
-      # Only rollback
+      # 9. GET ENVIRONMENT-SPECIFIC IMAGE HISTORY
       # ==========================================================
 
       - name: Get Latest 5 Environment Images
@@ -241,39 +238,33 @@ jobs:
         run: |
 
           echo "======================================"
-          echo "AVAILABLE $DEPLOY_ENV IMAGES"
+          echo "IMAGE HISTORY"
+          echo "Environment : $DEPLOY_ENV"
+          echo "Registry    : $ACR_NAME"
           echo "======================================"
 
           ALL_TAGS=$(az acr repository show-tags \
             --name "$ACR_NAME" \
             --repository "$IMAGE_NAME" \
-            --orderby time_desc \
             --output json)
 
-          FILTERED_TAGS=$(echo "$ALL_TAGS" | jq -c --arg ENV "$DEPLOY_ENV" '
-            map(select(test("^v.*-" + $ENV + "-b[0-9]+$")))
-            | .[0:5]
-          ')
+          ENV_TAGS=$(echo "$ALL_TAGS" | jq -r --arg ENV "$DEPLOY_ENV" '
+            .[]
+            | select(test("^v[0-9.]+-" + $ENV + "-b[0-9]+$"))
+          ' | sort -t'b' -k2,2nr | head -5)
 
-          if [ "$(echo "$FILTERED_TAGS" | jq 'length')" -eq 0 ]; then
-
-            echo "No $DEPLOY_ENV images found in $ACR_NAME."
-
+          if [ -z "$ENV_TAGS" ]; then
+            echo "No images found for environment: $DEPLOY_ENV"
             exit 1
-
           fi
 
-          echo "$FILTERED_TAGS" | jq -r '.[]'
+          echo ""
+          echo "Available rollback images:"
+          echo ""
 
-
+          echo "$ENV_TAGS"
       # ==========================================================
       # 10. DETERMINE ROLLBACK IMAGE
-      #
-      # latest      = index 0
-      # latest -1   = index 1
-      # latest -2   = index 2
-      # latest -3   = index 3
-      # latest -4   = index 4
       # ==========================================================
 
       - name: Determine Rollback Image
@@ -283,84 +274,77 @@ jobs:
 
           SELECTED="${{ github.event.inputs.deploy_tag }}"
 
-          echo "Selected rollback option: $SELECTED"
+          echo "======================================"
+          echo "ROLLBACK SELECTION"
+          echo "======================================"
+          echo "Environment : $DEPLOY_ENV"
+          echo "Selection   : $SELECTED"
+          echo "Registry    : $ACR_NAME"
+          echo ""
 
-          # Get all tags from the selected ACR
           ALL_TAGS=$(az acr repository show-tags \
             --name "$ACR_NAME" \
             --repository "$IMAGE_NAME" \
-            --orderby time_desc \
             --output json)
 
-          # Keep ONLY the selected environment's tags
-          ENV_TAGS=$(echo "$ALL_TAGS" | jq -c --arg ENV "$DEPLOY_ENV" '
-            map(select(test("^v.*-" + $ENV + "-b[0-9]+$")))
-            | .[0:5]
-          ')
+          ENV_TAGS=$(echo "$ALL_TAGS" | jq -r --arg ENV "$DEPLOY_ENV" '
+            .[]
+            | select(test("^v[0-9.]+-" + $ENV + "-b[0-9]+$"))
+          ' | sort -t'b' -k2,2nr | head -5)
 
-          echo "Environment-specific tags:"
-          echo "$ENV_TAGS" | jq -r '.[]'
+          echo "Latest 5 $DEPLOY_ENV images:"
+          echo "$ENV_TAGS"
+          echo ""
 
+          case "$SELECTED" in
 
-          # Determine requested index
+            "latest")
+              INDEX=0
+              ;;
 
-          if [ "$SELECTED" = "latest" ]; then
+            "latest -1")
+              INDEX=1
+              ;;
 
-            INDEX=0
+            "latest -2")
+              INDEX=2
+              ;;
 
-          elif [ "$SELECTED" = "latest -1" ]; then
+            "latest -3")
+              INDEX=3
+              ;;
 
-            INDEX=1
+            "latest -4")
+              INDEX=4
+              ;;
 
-          elif [ "$SELECTED" = "latest -2" ]; then
+            *)
+              echo "Invalid rollback selection"
+              exit 1
+              ;;
 
-            INDEX=2
+          esac
 
-          elif [ "$SELECTED" = "latest -3" ]; then
+          IMAGE_TAG=$(echo "$ENV_TAGS" | sed -n "$((INDEX + 1))p")
 
-            INDEX=3
-
-          elif [ "$SELECTED" = "latest -4" ]; then
-
-            INDEX=4
-
-          else
-
-            echo "Invalid rollback selection."
-            exit 1
-
-          fi
-
-
-          # Get selected tag
-
-          IMAGE_TAG=$(echo "$ENV_TAGS" | jq -r ".[$INDEX]")
-
-
-          # Check image exists
-
-          if [ "$IMAGE_TAG" = "null" ] || [ -z "$IMAGE_TAG" ]; then
+          if [ -z "$IMAGE_TAG" ]; then
 
             echo "======================================"
             echo "ROLLBACK FAILED"
             echo "======================================"
 
-            echo "Requested: $SELECTED"
-
-            echo "Only $(echo "$ENV_TAGS" | jq 'length') image(s) are available."
+            echo "Requested : $SELECTED"
+            echo "Available : $(echo "$ENV_TAGS" | wc -l)"
 
             exit 1
 
           fi
 
-
-          # Save selected image
-
           echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
 
-
+          echo ""
           echo "======================================"
-          echo "ROLLBACK DEPLOYMENT"
+          echo "ROLLBACK READY"
           echo "======================================"
           echo "Environment : $DEPLOY_ENV"
           echo "Selection   : $SELECTED"
@@ -368,8 +352,6 @@ jobs:
           echo "Registry    : $ACR_NAME"
           echo "Image       : $ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
           echo "======================================"
-
-
       # ==========================================================
       # 11. DEPLOY CONTAINER APP
       #
