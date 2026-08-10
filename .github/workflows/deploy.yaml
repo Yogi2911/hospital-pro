@@ -449,23 +449,17 @@ jobs:
           echo "Container App update completed."
 
 
-      # ==========================================================
-      # 12. VERIFY DEPLOYMENT
+            # ==========================================================
+      # 12. VERIFY REVISION
       # ==========================================================
 
-      - name: Verify Deployment
+      - name: Verify Deployment and Revision
         shell: bash
         run: |
 
           echo "======================================"
-          echo "DEPLOYMENT COMPLETE"
+          echo "VERIFYING DEPLOYMENT"
           echo "======================================"
-
-          echo "Environment : $DEPLOY_ENV"
-          echo "Registry    : $ACR_NAME"
-          echo "Image       : $IMAGE_TAG"
-          echo "Container   : $APP_NAME"
-          echo ""
 
           RUNNING_IMAGE=$(az containerapp show \
             --name "$APP_NAME" \
@@ -473,29 +467,42 @@ jobs:
             --query "properties.template.containers[0].image" \
             -o tsv)
 
-          echo "Currently deployed image:"
-          echo "$RUNNING_IMAGE"
+          LATEST_REVISION=$(az containerapp show \
+            --name "$APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "properties.latestRevisionName" \
+            -o tsv)
+
+          echo "Environment       : $DEPLOY_ENV"
+          echo "Container App     : $APP_NAME"
+          echo "Expected Image    : $ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
+          echo "Running Image     : $RUNNING_IMAGE"
+          echo "Latest Revision   : $LATEST_REVISION"
 
           echo ""
 
           if [ "$RUNNING_IMAGE" = "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG" ]; then
 
             echo "======================================"
-            echo "VERIFICATION SUCCESSFUL"
+            echo "ROLLBACK/DEPLOYMENT SUCCESSFUL"
             echo "======================================"
 
           else
 
             echo "======================================"
-            echo "VERIFICATION FAILED"
+            echo "DEPLOYMENT VERIFICATION FAILED"
             echo "======================================"
-
-            echo "Expected:"
-            echo "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
-
-            echo "Actual:"
-            echo "$RUNNING_IMAGE"
 
             exit 1
 
           fi
+
+          echo ""
+          echo "Container App revisions:"
+          echo "--------------------------------------"
+
+          az containerapp revision list \
+            --name "$APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "[].{Revision:name,Active:properties.active,Replicas:properties.replicas,State:properties.runningState,Health:properties.healthState,Image:properties.template.containers[0].image}" \
+            -o table
