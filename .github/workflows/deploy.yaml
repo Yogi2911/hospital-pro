@@ -243,10 +243,8 @@ jobs:
           echo "Docker image pushed successfully."
 
 
-      # ==========================================================
+            # ==========================================================
       # 9. GET ENVIRONMENT-SPECIFIC IMAGE HISTORY
-      #
-      # Only rollback
       # ==========================================================
 
       - name: Get Latest 5 Environment Images
@@ -256,11 +254,13 @@ jobs:
 
           echo "======================================"
           echo "IMAGE HISTORY"
-          echo "======================================"
-
           echo "Environment : $DEPLOY_ENV"
           echo "Registry    : $ACR_NAME"
           echo "Repository  : $IMAGE_NAME"
+          echo "======================================"
+
+          echo ""
+          echo "Filtering $DEPLOY_ENV images..."
           echo ""
 
           ALL_TAGS=$(az acr repository show-tags \
@@ -268,46 +268,41 @@ jobs:
             --repository "$IMAGE_NAME" \
             --output json)
 
-          echo "Filtering $DEPLOY_ENV images..."
+          # Filter only tags belonging to the selected environment.
+          # Example:
+          # v1.0.0-dev-b14
+          # v1.0.0-dev-b8
+          # v1.0.0-dev-b1
 
-          ENV_TAGS=$(echo "$ALL_TAGS" | jq -r \
-            --arg ENV "$DEPLOY_ENV" '
-              [
-                .[]
-                | select(
-                    test("^v[0-9.]+-" + $ENV + "-b[0-9]+$")
-                  )
-              ]
-              | sort_by(
-                  capture("-b(?<build>[0-9]+)$").build
-                  | tonumber
-                )
-              | reverse
-              | .[0:5]
-              | .[]
-            ')
+          ENV_TAGS=$(echo "$ALL_TAGS" | jq -r --arg ENV "$DEPLOY_ENV" '
+            .[]
+            | select(test("^v[0-9.]+-" + $ENV + "-b[0-9]+$"))
+          ' | while read TAG; do
+                BUILD=$(echo "$TAG" | sed -E 's/.*-b([0-9]+)$/\1/')
+                echo "$BUILD|$TAG"
+            done | sort -t'|' -k1,1nr | head -5 | cut -d'|' -f2)
 
           if [ -z "$ENV_TAGS" ]; then
-
-            echo "======================================"
-            echo "NO IMAGES FOUND"
-            echo "======================================"
-
-            echo "No $DEPLOY_ENV images found in $ACR_NAME."
-
+            echo ""
+            echo "❌ No images found for environment: $DEPLOY_ENV"
+            echo ""
+            echo "All available tags:"
+            echo "$ALL_TAGS" | jq -r '.[]'
             exit 1
-
           fi
 
-          echo ""
-          echo "Available $DEPLOY_ENV images:"
-          echo ""
+          echo "Available rollback images:"
+          echo "--------------------------------------"
 
-          echo "$ENV_TAGS"
+          COUNT=0
 
-          echo ""
-          echo "======================================"
+          while read TAG; do
+            echo "[$COUNT] $TAG"
+            COUNT=$((COUNT + 1))
+          done <<< "$ENV_TAGS"
 
+          echo "--------------------------------------"
+          echo "Total available: $COUNT"
 
       # ==========================================================
       # 10. DETERMINE ROLLBACK IMAGE
