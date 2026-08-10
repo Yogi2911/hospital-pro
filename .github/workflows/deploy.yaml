@@ -114,7 +114,7 @@ jobs:
 
 
       # ==========================================================
-      # 4. SELECT ENVIRONMENT ACR + CONTAINER APP
+      # 4. SELECT ACR + CONTAINER APP
       # ==========================================================
 
       - name: Select ACR and Container App
@@ -155,19 +155,23 @@ jobs:
 
 
       # ==========================================================
-      # 5. LOGIN TO SELECTED ACR
+      # 5. LOGIN TO ACR
       # ==========================================================
 
       - name: Login to ACR
         run: |
 
+          echo "Logging into $ACR_NAME..."
+
           az acr login --name "$ACR_NAME"
+
+          echo "ACR login successful."
 
 
       # ==========================================================
       # 6. AUTOMATIC IMAGE TAG
       #
-      # Runs ONLY for git push
+      # Runs only for push
       # ==========================================================
 
       - name: Generate Automatic Image Tag
@@ -176,6 +180,12 @@ jobs:
         run: |
 
           VERSION="${{ vars.VERSION }}"
+
+          if [ -z "$VERSION" ]; then
+            echo "VERSION variable is not configured."
+            echo "Please create VERSION variable in GitHub Environment."
+            exit 1
+          fi
 
           BUILD="${{ github.run_number }}"
 
@@ -187,6 +197,8 @@ jobs:
           echo "AUTOMATIC DEPLOYMENT"
           echo "======================================"
           echo "Environment : $DEPLOY_ENV"
+          echo "Version     : $VERSION"
+          echo "Build       : $BUILD"
           echo "Image Tag   : $IMAGE_TAG"
           echo "Registry    : $ACR_NAME"
           echo "======================================"
@@ -195,41 +207,46 @@ jobs:
       # ==========================================================
       # 7. BUILD DOCKER IMAGE
       #
-      # Only automatic deployment
+      # Only push deployment
       # ==========================================================
 
       - name: Build Docker Image
         if: github.event_name == 'push'
+        shell: bash
         run: |
 
-          echo "Building image..."
+          echo "Building Docker image..."
 
           docker build \
             -t "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG" \
             .
 
-          echo "Build completed."
+          echo "Docker image built successfully."
 
 
       # ==========================================================
       # 8. PUSH DOCKER IMAGE
       #
-      # Only automatic deployment
+      # Only push deployment
       # ==========================================================
 
       - name: Push Docker Image
         if: github.event_name == 'push'
+        shell: bash
         run: |
 
-          echo "Pushing image..."
+          echo "Pushing Docker image..."
 
           docker push \
             "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
 
-          echo "Image pushed successfully."
+          echo "Docker image pushed successfully."
+
 
       # ==========================================================
       # 9. GET ENVIRONMENT-SPECIFIC IMAGE HISTORY
+      #
+      # Only rollback
       # ==========================================================
 
       - name: Get Latest 5 Environment Images
@@ -239,32 +256,67 @@ jobs:
 
           echo "======================================"
           echo "IMAGE HISTORY"
+          echo "======================================"
+
           echo "Environment : $DEPLOY_ENV"
           echo "Registry    : $ACR_NAME"
-          echo "======================================"
+          echo "Repository  : $IMAGE_NAME"
+          echo ""
 
           ALL_TAGS=$(az acr repository show-tags \
             --name "$ACR_NAME" \
             --repository "$IMAGE_NAME" \
             --output json)
 
-          ENV_TAGS=$(echo "$ALL_TAGS" | jq -r --arg ENV "$DEPLOY_ENV" '
-            .[]
-            | select(test("^v[0-9.]+-" + $ENV + "-b[0-9]+$"))
-          ' | sort -t'b' -k2,2nr | head -5)
+          echo "Filtering $DEPLOY_ENV images..."
+
+          ENV_TAGS=$(echo "$ALL_TAGS" | jq -r \
+            --arg ENV "$DEPLOY_ENV" '
+              [
+                .[]
+                | select(
+                    test("^v[0-9.]+-" + $ENV + "-b[0-9]+$")
+                  )
+              ]
+              | sort_by(
+                  capture("-b(?<build>[0-9]+)$").build
+                  | tonumber
+                )
+              | reverse
+              | .[0:5]
+              | .[]
+            ')
 
           if [ -z "$ENV_TAGS" ]; then
-            echo "No images found for environment: $DEPLOY_ENV"
+
+            echo "======================================"
+            echo "NO IMAGES FOUND"
+            echo "======================================"
+
+            echo "No $DEPLOY_ENV images found in $ACR_NAME."
+
             exit 1
+
           fi
 
           echo ""
-          echo "Available rollback images:"
+          echo "Available $DEPLOY_ENV images:"
           echo ""
 
           echo "$ENV_TAGS"
+
+          echo ""
+          echo "======================================"
+
+
       # ==========================================================
       # 10. DETERMINE ROLLBACK IMAGE
+      #
+      # latest     = newest
+      # latest -1  = previous
+      # latest -2  = 2 versions back
+      # latest -3  = 3 versions back
+      # latest -4  = 4 versions back
       # ==========================================================
 
       - name: Determine Rollback Image
@@ -277,24 +329,63 @@ jobs:
           echo "======================================"
           echo "ROLLBACK SELECTION"
           echo "======================================"
+
           echo "Environment : $DEPLOY_ENV"
           echo "Selection   : $SELECTED"
           echo "Registry    : $ACR_NAME"
           echo ""
+
+          # ------------------------------------------------------
+          # Get all tags
+          # ------------------------------------------------------
 
           ALL_TAGS=$(az acr repository show-tags \
             --name "$ACR_NAME" \
             --repository "$IMAGE_NAME" \
             --output json)
 
-          ENV_TAGS=$(echo "$ALL_TAGS" | jq -r --arg ENV "$DEPLOY_ENV" '
-            .[]
-            | select(test("^v[0-9.]+-" + $ENV + "-b[0-9]+$"))
-          ' | sort -t'b' -k2,2nr | head -5)
+          # ------------------------------------------------------
+          # Filter only selected environment
+          # and sort by numeric build number
+          # ------------------------------------------------------
+
+          ENV_TAGS=$(echo "$ALL_TAGS" | jq -r \
+            --arg ENV "$DEPLOY_ENV" '
+              [
+                .[]
+                | select(
+                    test("^v[0-9.]+-" + $ENV + "-b[0-9]+$")
+                  )
+              ]
+              | sort_by(
+                  capture("-b(?<build>[0-9]+)$").build
+                  | tonumber
+                )
+              | reverse
+              | .[0:5]
+              | .[]
+            ')
+
+          if [ -z "$ENV_TAGS" ]; then
+
+            echo "======================================"
+            echo "ROLLBACK FAILED"
+            echo "======================================"
+
+            echo "No images found for environment: $DEPLOY_ENV"
+
+            exit 1
+
+          fi
 
           echo "Latest 5 $DEPLOY_ENV images:"
+          echo ""
           echo "$ENV_TAGS"
           echo ""
+
+          # ------------------------------------------------------
+          # Determine selected index
+          # ------------------------------------------------------
 
           case "$SELECTED" in
 
@@ -319,13 +410,21 @@ jobs:
               ;;
 
             *)
-              echo "Invalid rollback selection"
+              echo "Invalid rollback selection: $SELECTED"
               exit 1
               ;;
 
           esac
 
+          # ------------------------------------------------------
+          # Select image
+          # ------------------------------------------------------
+
           IMAGE_TAG=$(echo "$ENV_TAGS" | sed -n "$((INDEX + 1))p")
+
+          # ------------------------------------------------------
+          # Check selected image exists
+          # ------------------------------------------------------
 
           if [ -z "$IMAGE_TAG" ]; then
 
@@ -340,27 +439,36 @@ jobs:
 
           fi
 
+          # ------------------------------------------------------
+          # Save image tag
+          # ------------------------------------------------------
+
           echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
 
           echo ""
           echo "======================================"
           echo "ROLLBACK READY"
           echo "======================================"
+
           echo "Environment : $DEPLOY_ENV"
           echo "Selection   : $SELECTED"
           echo "Image Tag   : $IMAGE_TAG"
           echo "Registry    : $ACR_NAME"
           echo "Image       : $ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
+
           echo "======================================"
+
+
       # ==========================================================
       # 11. DEPLOY CONTAINER APP
       #
       # Runs for:
-      #   PUSH       → new image
-      #   ROLLBACK   → existing image
+      #   PUSH       -> new image
+      #   ROLLBACK   -> selected old image
       # ==========================================================
 
       - name: Deploy Container App
+        shell: bash
         run: |
 
           echo "======================================"
@@ -369,12 +477,17 @@ jobs:
 
           echo "Environment : $DEPLOY_ENV"
           echo "Container   : $APP_NAME"
+          echo "Registry    : $ACR_NAME"
           echo "Image       : $ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
+          echo ""
 
           az containerapp update \
             --name "$APP_NAME" \
             --resource-group "$RESOURCE_GROUP" \
             --image "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
+
+          echo ""
+          echo "Container App update completed."
 
 
       # ==========================================================
@@ -382,6 +495,7 @@ jobs:
       # ==========================================================
 
       - name: Verify Deployment
+        shell: bash
         run: |
 
           echo "======================================"
@@ -392,12 +506,37 @@ jobs:
           echo "Registry    : $ACR_NAME"
           echo "Image       : $IMAGE_TAG"
           echo "Container   : $APP_NAME"
-
           echo ""
-          echo "Container App is running image:"
 
-          az containerapp show \
+          RUNNING_IMAGE=$(az containerapp show \
             --name "$APP_NAME" \
             --resource-group "$RESOURCE_GROUP" \
             --query "properties.template.containers[0].image" \
-            -o tsv 
+            -o tsv)
+
+          echo "Currently deployed image:"
+          echo "$RUNNING_IMAGE"
+
+          echo ""
+
+          if [ "$RUNNING_IMAGE" = "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG" ]; then
+
+            echo "======================================"
+            echo "VERIFICATION SUCCESSFUL"
+            echo "======================================"
+
+          else
+
+            echo "======================================"
+            echo "VERIFICATION FAILED"
+            echo "======================================"
+
+            echo "Expected:"
+            echo "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
+
+            echo "Actual:"
+            echo "$RUNNING_IMAGE"
+
+            exit 1
+
+          fi
