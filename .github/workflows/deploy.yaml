@@ -1,20 +1,33 @@
 name: Multi Environment Deployment
+
 on:
   push:
     branches:
       - dev
       - qa
       - main
+
   workflow_dispatch:
     inputs:
       environment:
-        description: "Environment"
+        description: "Select target environment"
         required: true
         type: choice
         options:
           - dev
           - qa
           - prod
+
+      deploy_tag:
+        description: "Select image version to deploy"
+        required: true
+        type: choice
+        options:
+          - latest
+          - latest -1
+          - latest -2
+          - latest -3
+          - latest -4
 
 permissions:
   id-token: write
@@ -25,95 +38,306 @@ env:
   ACR_NAME: hospacr26
   ACR_LOGIN_SERVER: hospacr26.azurecr.io
   IMAGE_NAME: hospital-api
+
   DEV_APP: hospital-dev
   QA_APP: hospital-qa
   PROD_APP: hospital-prod
 
 jobs:
+
   deploy:
+
     runs-on: ubuntu-latest
+
     environment: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || (github.ref_name == 'main' && 'prod' || github.ref_name) }}
+
     steps:
-      
-    ###########################################################
 
-    - name: Checkout
-      uses: actions/checkout@v4
+      ###########################################################
+      # Checkout
+      ###########################################################
 
-    ###########################################################
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Azure Login
-      uses: azure/login@v2
-      with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-    ###########################################################
+      ###########################################################
+      # Azure Login
+      ###########################################################
 
-    - name: Login ACR
-      run: |
-        az acr login --name $ACR_NAME
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-    ###########################################################
+      ###########################################################
+      # Decide Environment
+      ###########################################################
 
-    - name: Decide Environment
-      run: |
-        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          ENV=${{ github.event.inputs.environment }}
-        else
-          BRANCH=${GITHUB_REF_NAME}
-          if [ "$BRANCH" = "dev" ]; then
-            ENV=dev
-          elif [ "$BRANCH" = "qa" ]; then
-            ENV=qa
+      - name: Decide Environment
+        run: |
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+
+            ENV="${{ github.event.inputs.environment }}"
+
           else
-            ENV=prod
+
+            BRANCH="${GITHUB_REF_NAME}"
+
+            if [ "$BRANCH" = "dev" ]; then
+              ENV="dev"
+
+            elif [ "$BRANCH" = "qa" ]; then
+              ENV="qa"
+
+            elif [ "$BRANCH" = "main" ]; then
+              ENV="prod"
+
+            else
+              echo "Unsupported branch: $BRANCH"
+              exit 1
+            fi
+
           fi
-        fi
-        echo "DEPLOY_ENV=$ENV" >> $GITHUB_ENV
 
-    ###########################################################
+          echo "DEPLOY_ENV=$ENV" >> "$GITHUB_ENV"
 
-    - name: Generate Image Version
-      run: |
-        VERSION=${{ vars.VERSION }}
-        BUILD=${{ github.run_number }}
-        IMAGE_TAG=v${VERSION}-${DEPLOY_ENV}-b${BUILD}
-        echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
-        echo "Image Tag = $IMAGE_TAG"
+          echo "Deployment Environment = $ENV"
 
-    ###########################################################
 
-    - name: Build Docker Image
-      run: |
-        docker build \
-          -t $ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG .
+      ###########################################################
+      # Login to ACR
+      ###########################################################
 
-    ###########################################################
+      - name: Login to ACR
+        run: |
+          az acr login --name "$ACR_NAME"
 
-    - name: Push Docker Image
-      run: |
-        docker push \
-          $ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG
 
-    ###########################################################
+      ###########################################################
+      # Automatic Build
+      #
+      # Runs only when code is pushed.
+      ###########################################################
 
-    - name: Select Container App
-      run: |
-        if [ "$DEPLOY_ENV" = "dev" ]; then
-          echo "APP_NAME=$DEV_APP" >> $GITHUB_ENV
-        elif [ "$DEPLOY_ENV" = "qa" ]; then
-          echo "APP_NAME=$QA_APP" >> $GITHUB_ENV
-        else
-          echo "APP_NAME=$PROD_APP" >> $GITHUB_ENV
-        fi
+      - name: Generate Image Version
+        if: github.event_name == 'push'
+        run: |
 
-    ###########################################################
+          VERSION="${{ vars.VERSION }}"
+          BUILD="${{ github.run_number }}"
 
-    - name: Deploy Container App
-      run: |
-        az containerapp update \
-          --name $APP_NAME \
-          --resource-group $RESOURCE_GROUP \
-          --image $ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: VERSION variable is not configured."
+            exit 1
+          fi
 
-   
+          IMAGE_TAG="v${VERSION}-${DEPLOY_ENV}-b${BUILD}"
+
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+
+          echo "New Image Tag = $IMAGE_TAG"
+
+
+      ###########################################################
+      # Build Docker Image
+      ###########################################################
+
+      - name: Build Docker Image
+        if: github.event_name == 'push'
+        run: |
+
+          docker build \
+            -t "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG" \
+            .
+
+
+      ###########################################################
+      # Push Docker Image
+      ###########################################################
+
+      - name: Push Docker Image
+        if: github.event_name == 'push'
+        run: |
+
+          docker push \
+            "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
+
+
+      ###########################################################
+      # Select Existing Image for Manual Deployment
+      #
+      # latest     = newest image
+      # latest -1  = previous image
+      # latest -2  = two versions back
+      ###########################################################
+
+      - name: Select Deployment Image
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+
+          SELECTED_TAG="${{ github.event.inputs.deploy_tag }}"
+
+          echo "Requested deployment tag: $SELECTED_TAG"
+
+          #######################################################
+          # Get VERSION
+          #######################################################
+
+          VERSION="${{ vars.VERSION }}"
+
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: VERSION variable is not configured."
+            exit 1
+          fi
+
+          #######################################################
+          # Convert:
+          #
+          # latest     -> 0
+          # latest -1  -> 1
+          # latest -2  -> 2
+          # etc.
+          #######################################################
+
+          if [ "$SELECTED_TAG" = "latest" ]; then
+            INDEX=0
+          else
+            INDEX=$(echo "$SELECTED_TAG" | sed 's/latest -//')
+          fi
+
+          echo "Requested image index: $INDEX"
+
+
+          #######################################################
+          # Get environment-specific image tags
+          #######################################################
+
+          PREFIX="v${VERSION}-${DEPLOY_ENV}-b"
+
+          echo "Searching ACR for tags beginning with: $PREFIX"
+
+          TAGS=$(az acr repository show-tags \
+            --name "$ACR_NAME" \
+            --repository "$IMAGE_NAME" \
+            --orderby time_desc \
+            --output json \
+            --query "[?starts_with(@, '$PREFIX')]")
+
+          echo "Available tags:"
+          echo "$TAGS"
+
+
+          #######################################################
+          # Select requested image
+          #######################################################
+
+          IMAGE_TAG=$(echo "$TAGS" | jq -r ".[$INDEX]")
+
+          if [ "$IMAGE_TAG" = "null" ] || [ -z "$IMAGE_TAG" ]; then
+
+            echo "ERROR: Requested image does not exist."
+
+            echo "Available images:"
+            echo "$TAGS"
+
+            exit 1
+          fi
+
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+
+          echo "Selected Image = $IMAGE_TAG"
+
+
+      ###########################################################
+      # Select Container App
+      ###########################################################
+
+      - name: Select Container App
+        run: |
+
+          if [ "$DEPLOY_ENV" = "dev" ]; then
+
+            echo "APP_NAME=$DEV_APP" >> "$GITHUB_ENV"
+
+          elif [ "$DEPLOY_ENV" = "qa" ]; then
+
+            echo "APP_NAME=$QA_APP" >> "$GITHUB_ENV"
+
+          elif [ "$DEPLOY_ENV" = "prod" ]; then
+
+            echo "APP_NAME=$PROD_APP" >> "$GITHUB_ENV"
+
+          else
+
+            echo "Unsupported environment: $DEPLOY_ENV"
+            exit 1
+
+          fi
+
+
+      ###########################################################
+      # Check Container App
+      ###########################################################
+
+      - name: Check Container App
+        run: |
+
+          echo "Checking Container App..."
+
+          az containerapp show \
+            --name "$APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --only-show-errors \
+            --output none
+
+          if [ $? -ne 0 ]; then
+            echo "ERROR: Container App $APP_NAME does not exist."
+            exit 1
+          fi
+
+          echo "Container App exists: $APP_NAME"
+
+
+      ###########################################################
+      # Deploy Container App
+      ###########################################################
+
+      - name: Deploy Container App
+        run: |
+
+          echo "Deploying:"
+          echo "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
+
+          echo "Target:"
+          echo "$APP_NAME"
+
+          az containerapp update \
+            --name "$APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --image "$ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
+
+
+      ###########################################################
+      # Show Deployment
+      ###########################################################
+
+      - name: Show Deployment
+        run: |
+
+          echo "=========================================="
+          echo "Deployment Successful"
+          echo "=========================================="
+
+          echo "Environment : $DEPLOY_ENV"
+          echo "Container App: $APP_NAME"
+          echo "Image       : $ACR_LOGIN_SERVER/$IMAGE_NAME:$IMAGE_TAG"
+
+          echo "=========================================="
+
+          az containerapp show \
+            --name "$APP_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "properties.template.containers[0].image" \
+            --output tsv
