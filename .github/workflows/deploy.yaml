@@ -177,7 +177,7 @@ jobs:
       # dev  -> hospdevacr26
       # qa   -> hospacrqa
       # main -> hospacr26
-      ###########################################################
+      ##########################################################
 
       - name: Generate Image Version
         if: github.event_name == 'push'
